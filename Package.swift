@@ -4,17 +4,6 @@
 import PackageDescription
 import Foundation
 
-let librsyncPrefix: String = {
-    // Detect typical Homebrew prefix at build time
-    if FileManager.default.fileExists(atPath: "/opt/homebrew") {
-        return "/opt/homebrew"
-    } else if FileManager.default.fileExists(atPath: "/usr/local") {
-        return "/usr/local"
-    } else {
-        return "/usr"
-    }
-}()
-
 let package = Package(
     name: "LibrsyncSwift",
     platforms: [
@@ -44,14 +33,7 @@ let package = Package(
             name: "LibrsyncSwift",
             dependencies: ["Clibrsync"],
             path: "Sources/LibrsyncSwift",
-            exclude: ["README.md"],
-            swiftSettings: [
-                .unsafeFlags(["-I\(librsyncPrefix)/include"], .when(platforms: [.macOS])),
-            ],
-            linkerSettings: [
-                .unsafeFlags(["-L\(librsyncPrefix)/lib"], .when(platforms: [.macOS])),
-                .linkedLibrary("rsync")
-            ]
+            exclude: ["README.md"]
         ),
 
         // Tests (Swift Testing - works on all platforms with Swift 6.1+)
