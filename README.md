@@ -80,7 +80,7 @@ for try await chunk in deltaStream {
 See [Sources/LibrsyncSwift/README.md](Sources/LibrsyncSwift/README.md) for detailed API documentation and examples.
 
 ## Example usage
-See project [HttpLibrsyncSwift](http:://github.com/schafdog/HttpLibrsyncSwift) for usage over TCP or HTTP using Hummingbird
+See project [HttpLibrsyncSwift](https://github.com/schafdog/HttpLibrsyncSwift) for usage over TCP or HTTP using Hummingbird
 
 ## License
 
