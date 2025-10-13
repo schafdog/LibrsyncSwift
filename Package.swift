@@ -26,10 +26,10 @@ let package = Package(
                 .apt(["librsync-dev"]),
                 .brew(["librsync"])
             ],
-	    cSettings: [
-	            .headerSearchPath("/opt/homebrew/include"),
-        	    .headerSearchPath("/usr/local/include")
-	    ]
+//	    cSettings: [
+//	            .headerSearchPath("/opt/homebrew/include"),
+//        	    .headerSearchPath("/usr/local/include")
+//	    ]
         ),
 
         // Shared connection library
