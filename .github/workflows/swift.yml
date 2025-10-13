@@ -19,10 +19,12 @@ jobs:
     - name: Server info
       run: uname -a 
     - name: Install librsync
-      run: brew install librsync pkg-config
-    - name: Fix pkg-config path
+      run: brew install librsync
+    - name: Set up compiler paths
       run: |
-        echo "PKG_CONFIG_PATH=$(brew --prefix librsync)/lib/pkgconfig" >> $GITHUB_ENV
+        BREW_PREFIX=$(brew --prefix)
+        echo "CPATH=$BREW_PREFIX/include" >> $GITHUB_ENV
+        echo "LIBRARY_PATH=$BREW_PREFIX/lib" >> $GITHUB_ENV
     - name: Build
       run: swift build -v
     - name: Run tests
