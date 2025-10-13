@@ -160,6 +160,7 @@ public struct SignatureStream: AsyncSequence, Sendable {
         private var result: rs_result
         private var isInitialized = false
         private var isDone = false
+        private var error: LibrsyncError?
 
         init(fileURL: URL, config: LibrsyncConfig) {
             self.fileURL = fileURL
@@ -170,10 +171,21 @@ public struct SignatureStream: AsyncSequence, Sendable {
             self.result = RS_RUNNING
         }
 
-        public mutating func next() async -> Data? {
+        public mutating func next() async throws -> Data? {
+            // Check for stored error
+            if let err = error {
+                throw err
+            }
+
             if !isInitialized {
+                guard FileManager.default.fileExists(atPath: fileURL.path) else {
+                    error = LibrsyncError.fileNotFound(fileURL.path)
+                    throw error!
+                }
+
                 guard let file = rs_file_open(fileURL.path, "rb", 0) else {
-                    return nil
+                    error = LibrsyncError.fileOpenFailed(fileURL.path)
+                    throw error!
                 }
                 self.file = file
 
@@ -186,12 +198,14 @@ public struct SignatureStream: AsyncSequence, Sendable {
                 let argsResult = rs_sig_args(fileSize, &sigMagic, &blockLen, &strongLen)
                 guard argsResult == RS_DONE else {
                     cleanup()
-                    return nil
+                    error = LibrsyncError.signatureGenerationFailed(argsResult)
+                    throw error!
                 }
 
                 guard let job = rs_sig_begin(blockLen, strongLen, sigMagic) else {
                     cleanup()
-                    return nil
+                    error = LibrsyncError.jobCreationFailed
+                    throw error!
                 }
                 self.job = job
 
@@ -233,7 +247,8 @@ public struct SignatureStream: AsyncSequence, Sendable {
                     if nBytes == 0 {
                         if ferror(file) != 0 {
                             cleanup()
-                            return nil
+                            error = LibrsyncError.fileReadError
+                            throw error!
                         }
                         bufs.eof_in = 1
                     }
@@ -247,7 +262,8 @@ public struct SignatureStream: AsyncSequence, Sendable {
 
                 if result != RS_DONE && result != RS_BLOCKED && result != RS_RUNNING {
                     cleanup()
-                    return nil
+                    error = LibrsyncError.signatureGenerationFailed(result)
+                    throw error!
                 }
 
                 // Check for output
