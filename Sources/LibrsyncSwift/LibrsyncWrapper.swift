@@ -343,8 +343,8 @@ public struct DeltaStream: AsyncSequence, Sendable {
             self.signatureHandle = signatureHandle
             self.config = config
             self.bufs = rs_buffers_t()
-            self.inBuffer = [UInt8](repeating: 0, count: config.bufferSize * 2)
-            self.outBuffer = [UInt8](repeating: 0, count: config.bufferSize * 2)
+            self.inBuffer = [UInt8](repeating: 0, count: config.bufferSize)
+            self.outBuffer = [UInt8](repeating: 0, count: config.bufferSize)
             self.result = RS_RUNNING
         }
 
@@ -509,7 +509,7 @@ public struct Librsync: Sendable {
         defer { rs_job_free(job) }
 
         var bufs = rs_buffers_t()
-        var inBuffer = [UInt8](repeating: 0, count: config.bufferSize * 4)
+        var inBuffer = [UInt8](repeating: 0, count: config.bufferSize)
 
         var result: rs_result = RS_RUNNING
 
@@ -640,8 +640,8 @@ public struct Librsync: Sendable {
         defer { rs_job_free(job) }
 
         var bufs = rs_buffers_t()
-        var inBuffer = [UInt8](repeating: 0, count: config.bufferSize * 2)
-        var outBuffer = [UInt8](repeating: 0, count: config.bufferSize * 4)
+        var inBuffer = [UInt8](repeating: 0, count: config.bufferSize)
+        var outBuffer = [UInt8](repeating: 0, count: config.bufferSize)
 
         bufs.next_in = inBuffer.withMutableInt8Pointer { $0 }
         bufs.next_out = outBuffer.withMutableInt8Pointer { $0 }
