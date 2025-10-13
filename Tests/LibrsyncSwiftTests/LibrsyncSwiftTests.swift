@@ -24,12 +24,6 @@ struct LibrsyncSwiftTests {
         let tempDir = FileManager.default.temporaryDirectory
         let fileURL = tempDir.appendingPathComponent(UUID().uuidString + ".txt")
         try content.write(to: fileURL, atomically: true, encoding: .utf8)
-
-        // Schedule cleanup
-        withKnownIssue {
-            try? FileManager.default.removeItem(at: fileURL)
-        }
-
         return fileURL
     }
 
@@ -37,12 +31,6 @@ struct LibrsyncSwiftTests {
         let tempDir = FileManager.default.temporaryDirectory
         let fileURL = tempDir.appendingPathComponent(UUID().uuidString + ".bin")
         try data.write(to: fileURL)
-
-        // Schedule cleanup
-        withKnownIssue {
-            try? FileManager.default.removeItem(at: fileURL)
-        }
-
         return fileURL
     }
 
@@ -301,7 +289,7 @@ struct LibrsyncSwiftTests {
 
         try await withThrowingTaskGroup(of: Data.self) { group in
             for fileURL in files {
-                group.addTask {
+                group.addTask { [rsync] in
                     try await rsync.generateSignature(from: fileURL)
                 }
             }

@@ -442,10 +442,11 @@ final class LibrsyncWrapperTests: XCTestCase {
         }
 
         // When: Generating signatures concurrently
+        let rsync = self.rsync!
         try await withThrowingTaskGroup(of: Data.self) { group in
             for fileURL in files {
                 group.addTask {
-                    try await self.rsync.generateSignature(from: fileURL)
+                    try await rsync.generateSignature(from: fileURL)
                 }
             }
 
