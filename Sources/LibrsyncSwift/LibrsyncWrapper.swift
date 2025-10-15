@@ -518,8 +518,9 @@ public struct DeltaReadStream: AsyncSequence, Sendable {
             }
 
             var nBytes: Int = 0
+	    let bufferSize = config.bufferSize
             buffer.withUnsafeMutableBytes { dest in
-                nBytes = fread(dest.baseAddress!, 1, config.bufferSize, file)
+                nBytes = fread(dest.baseAddress!, 1, bufferSize, file)
             }
 
             if nBytes == 0 {
