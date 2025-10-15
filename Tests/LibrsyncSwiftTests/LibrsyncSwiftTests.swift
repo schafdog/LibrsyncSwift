@@ -267,6 +267,98 @@ struct LibrsyncSwiftTests {
         }
     }
 
+    // MARK: - Streaming Delta Tests
+
+    @Test("Apply patch from delta stream")
+    func applyPatchFromDeltaStream() async throws {
+        // Given: Original and modified files
+        let originalContent = "Original content line 1\nLine 2\nLine 3\n"
+        let modifiedContent = "Modified content line 1\nLine 2\nLine 3\nLine 4\n"
+
+        let oldFileURL = try createTempFile(content: originalContent)
+        let newFileURL = try createTempFile(content: modifiedContent)
+        let deltaFileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + "_delta.bin")
+        let patchedFileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + "_patched.txt")
+
+        defer {
+            try? FileManager.default.removeItem(at: oldFileURL)
+            try? FileManager.default.removeItem(at: newFileURL)
+            try? FileManager.default.removeItem(at: deltaFileURL)
+            try? FileManager.default.removeItem(at: patchedFileURL)
+        }
+
+        // When: Generating delta and saving to file
+        let rsync = Librsync()
+        let signatureData = try await rsync.generateSignature(from: oldFileURL)
+        let signatureHandle = try await rsync.loadSignature(from: signatureData)
+        let deltaData = try await rsync.generateDelta(from: newFileURL, against: signatureHandle)
+        try deltaData.write(to: deltaFileURL)
+
+        // And: Applying patch from delta stream
+        let deltaStream = rsync.deltaReadStream(from: deltaFileURL)
+        try await rsync.applyPatch(delta: deltaStream, toBasis: oldFileURL, output: patchedFileURL)
+
+        // Then: Patched file should match modified file
+        let patchedContent = try String(contentsOf: patchedFileURL, encoding: .utf8)
+        #expect(patchedContent == modifiedContent, "Patched content should match modified content")
+    }
+
+    @Test("Apply patch with streaming delta in chunks")
+    func applyPatchWithStreamingDeltaInChunks() async throws {
+        // Given: Binary data files
+        var originalData = Data(count: 50000)
+        for i in 0..<50000 {
+            originalData[i] = UInt8(i % 256)
+        }
+
+        var modifiedData = originalData
+        // Modify some bytes
+        for i in stride(from: 0, to: 50000, by: 50) {
+            modifiedData[i] = UInt8((i + 42) % 256)
+        }
+
+        let oldFileURL = try createTempFile(data: originalData)
+        let newFileURL = try createTempFile(data: modifiedData)
+        let patchedFileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + "_patched.bin")
+
+        defer {
+            try? FileManager.default.removeItem(at: oldFileURL)
+            try? FileManager.default.removeItem(at: newFileURL)
+            try? FileManager.default.removeItem(at: patchedFileURL)
+        }
+
+        // When: Generating delta and streaming it in chunks
+        let rsync = Librsync()
+        let signatureData = try await rsync.generateSignature(from: oldFileURL)
+        let signatureHandle = try await rsync.loadSignature(from: signatureData)
+
+        // Create a custom stream that yields delta in small chunks
+        let deltaStream = AsyncStream<Data> { continuation in
+            Task {
+                for try await chunk in rsync.deltaStream(from: newFileURL, against: signatureHandle) {
+                    // Further split each chunk into smaller pieces to test streaming
+                    var offset = 0
+                    let chunkSize = 1024
+                    while offset < chunk.count {
+                        let end = min(offset + chunkSize, chunk.count)
+                        continuation.yield(chunk[offset..<end])
+                        offset = end
+                    }
+                }
+                continuation.finish()
+            }
+        }
+
+        try await rsync.applyPatch(delta: deltaStream, toBasis: oldFileURL, output: patchedFileURL)
+
+        // Then: Patched data should match modified data
+        let patchedData = try Data(contentsOf: patchedFileURL)
+        #expect(patchedData == modifiedData, "Patched data should match modified data")
+    }
+
     // MARK: - Thread Safety Tests
 
     @Test("Concurrent signature generation")
