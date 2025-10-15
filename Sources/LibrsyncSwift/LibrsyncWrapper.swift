@@ -466,6 +466,84 @@ public struct DeltaStream: AsyncSequence, Sendable {
     }
 }
 
+/// AsyncSequence that streams delta data from a file
+public struct DeltaReadStream: AsyncSequence, Sendable {
+    public typealias Element = Data
+
+    private let fileURL: URL
+    private let config: LibrsyncConfig
+
+    public init(fileURL: URL, config: LibrsyncConfig = .default) {
+        self.fileURL = fileURL
+        self.config = config
+    }
+
+    public func makeAsyncIterator() -> AsyncIterator {
+        AsyncIterator(fileURL: fileURL, config: config)
+    }
+
+    public struct AsyncIterator: AsyncIteratorProtocol {
+        private let fileURL: URL
+        private let config: LibrsyncConfig
+        private var file: UnsafeMutablePointer<FILE>?
+        private var buffer: [UInt8]
+        private var isInitialized = false
+        private var isDone = false
+
+        init(fileURL: URL, config: LibrsyncConfig) {
+            self.fileURL = fileURL
+            self.config = config
+            self.buffer = [UInt8](repeating: 0, count: config.bufferSize)
+        }
+
+        public mutating func next() async throws -> Data? {
+            if !isInitialized {
+                guard FileManager.default.fileExists(atPath: fileURL.path) else {
+                    throw LibrsyncError.fileNotFound(fileURL.path)
+                }
+
+                guard let file = rs_file_open(fileURL.path, "rb", 0) else {
+                    throw LibrsyncError.fileOpenFailed(fileURL.path)
+                }
+                self.file = file
+                isInitialized = true
+            }
+
+            if isDone {
+                return nil
+            }
+
+            guard let file = file else {
+                return nil
+            }
+
+            var nBytes: Int = 0
+            buffer.withUnsafeMutableBytes { dest in
+                nBytes = fread(dest.baseAddress!, 1, config.bufferSize, file)
+            }
+
+            if nBytes == 0 {
+                if ferror(file) != 0 {
+                    cleanup()
+                    throw LibrsyncError.fileReadError
+                }
+                cleanup()
+                isDone = true
+                return nil
+            }
+
+            return Data(buffer.prefix(nBytes))
+        }
+
+        private mutating func cleanup() {
+            if let file = file {
+                rs_file_close(file)
+                self.file = nil
+            }
+        }
+    }
+}
+
 // MARK: - Main Librsync API
 
 /// Modern Swift wrapper for librsync operations
@@ -492,6 +570,13 @@ public struct Librsync: Sendable {
     /// - Returns: AsyncSequence of delta data chunks
     public func deltaStream(from fileURL: URL, against signatureHandle: SignatureHandle) -> DeltaStream {
         DeltaStream(fileURL: fileURL, signatureHandle: signatureHandle, config: config)
+    }
+
+    /// Stream delta data from a file
+    /// - Parameter fileURL: URL of the delta file to read
+    /// - Returns: AsyncSequence of delta data chunks
+    public func deltaReadStream(from fileURL: URL) -> DeltaReadStream {
+        DeltaReadStream(fileURL: fileURL, config: config)
     }
 
     // MARK: - Signature Loading
@@ -614,12 +699,12 @@ public struct Librsync: Sendable {
         return result
     }
 
-    /// Apply a delta patch to a basis file
+    /// Apply a delta patch to a basis file from streaming delta data
     /// - Parameters:
-    ///   - deltaData: The delta data
+    ///   - deltaStream: AsyncSequence of delta data chunks
     ///   - basisFileURL: URL of the basis (old) file
     ///   - outputFileURL: URL where the patched file should be written
-    public func applyPatch(delta deltaData: Data, toBasis basisFileURL: URL, output outputFileURL: URL) async throws {
+    public func applyPatch<S: AsyncSequence>(delta deltaStream: S, toBasis basisFileURL: URL, output outputFileURL: URL) async throws where S.Element == Data {
         guard FileManager.default.fileExists(atPath: basisFileURL.path) else {
             throw LibrsyncError.fileNotFound(basisFileURL.path)
         }
@@ -643,51 +728,84 @@ public struct Librsync: Sendable {
         var inBuffer = [UInt8](repeating: 0, count: config.bufferSize)
         var outBuffer = [UInt8](repeating: 0, count: config.bufferSize)
 
-        bufs.next_in = inBuffer.withMutableInt8Pointer { $0 }
         bufs.next_out = outBuffer.withMutableInt8Pointer { $0 }
         bufs.avail_out = outBuffer.count
 
-        let deltaBytes = [UInt8](deltaData)
-        var offset = 0
         var result: rs_result = RS_RUNNING
 
-        while result == RS_RUNNING || result == RS_BLOCKED {
-            // Fill input buffer
-            if bufs.avail_in < inBuffer.count / 2 && offset < deltaBytes.count {
+        for try await chunk in deltaStream {
+            let chunkBytes = [UInt8](chunk)
+            var offset = 0
+
+            while offset < chunkBytes.count && (result == RS_RUNNING || result == RS_BLOCKED) {
+                // Move remaining data to start
                 if bufs.avail_in > 0 {
                     inBuffer.withUnsafeMutableBytes { dest in
                         _ = memmove(dest.baseAddress!, bufs.next_in, bufs.avail_in)
                     }
                 }
 
-                let chunkSize = min(inBuffer.count - Int(bufs.avail_in), deltaBytes.count - offset)
-                deltaBytes.withUnsafeBytes { src in
+                // Copy new data
+                let spaceAvailable = inBuffer.count - Int(bufs.avail_in)
+                let bytesToCopy = min(spaceAvailable, chunkBytes.count - offset)
+
+                chunkBytes.withUnsafeBytes { src in
                     inBuffer.withUnsafeMutableBytes { dest in
                         _ = memcpy(
                             dest.baseAddress!.advanced(by: Int(bufs.avail_in)),
                             src.baseAddress!.advanced(by: offset),
-                            chunkSize
+                            bytesToCopy
                         )
                     }
                 }
 
                 bufs.next_in = inBuffer.withMutableInt8Pointer { $0 }
-                bufs.avail_in += chunkSize
-                offset += chunkSize
+                bufs.avail_in += bytesToCopy
+                offset += bytesToCopy
 
-                if offset >= deltaBytes.count {
-                    bufs.eof_in = 1
+                // Process all available data
+                while bufs.avail_in > 0 && (result == RS_RUNNING || result == RS_BLOCKED) {
+                    let availBefore = bufs.avail_in
+                    result = rs_job_iter(job, &bufs)
+
+                    if result != RS_DONE && result != RS_BLOCKED && result != RS_RUNNING {
+                        throw LibrsyncError.patchApplicationFailed(result)
+                    }
+
+                    // Write output if any
+                    let outputSize = outBuffer.withInt8Pointer { baseAddr in
+                        guard let nextOut = bufs.next_out else { return 0 }
+                        return UnsafePointer(nextOut) - baseAddr
+                    }
+
+                    if outputSize > 0 {
+                        let written = fwrite(outBuffer, 1, outputSize, outputFile)
+                        if written != outputSize {
+                            throw LibrsyncError.fileWriteError
+                        }
+
+                        bufs.next_out = outBuffer.withMutableInt8Pointer { $0 }
+                        bufs.avail_out = outBuffer.count
+                    }
+
+                    // If no data consumed, need more input
+                    if bufs.avail_in == availBefore {
+                        break
+                    }
                 }
             }
+        }
 
-            // Process data
+        // Mark EOF and finish processing
+        bufs.eof_in = 1
+        while result == RS_RUNNING || result == RS_BLOCKED {
             result = rs_job_iter(job, &bufs)
 
             if result != RS_DONE && result != RS_BLOCKED && result != RS_RUNNING {
                 throw LibrsyncError.patchApplicationFailed(result)
             }
 
-            // Write output
+            // Write any remaining output
             let outputSize = outBuffer.withInt8Pointer { baseAddr in
                 guard let nextOut = bufs.next_out else { return 0 }
                 return UnsafePointer(nextOut) - baseAddr
@@ -705,20 +823,47 @@ public struct Librsync: Sendable {
         }
     }
 
-    /// Apply patch and atomically replace original file
+    /// Apply a delta patch to a basis file from in-memory delta data
     /// - Parameters:
     ///   - deltaData: The delta data
+    ///   - basisFileURL: URL of the basis (old) file
+    ///   - outputFileURL: URL where the patched file should be written
+    public func applyPatch(delta deltaData: Data, toBasis basisFileURL: URL, output outputFileURL: URL) async throws {
+        // Create single-element async sequence
+        let stream = AsyncStream<Data> { continuation in
+            continuation.yield(deltaData)
+            continuation.finish()
+        }
+        try await applyPatch(delta: stream, toBasis: basisFileURL, output: outputFileURL)
+    }
+
+    /// Apply patch and atomically replace original file from streaming delta data
+    /// - Parameters:
+    ///   - deltaStream: AsyncSequence of delta data chunks
     ///   - fileURL: URL of the file to patch (will be replaced)
-    public func patch(_ fileURL: URL, with deltaData: Data) async throws {
+    public func patch<S: AsyncSequence>(_ fileURL: URL, with deltaStream: S) async throws where S.Element == Data {
         let tempURL = fileURL.appendingPathExtension("new")
 
-        try await applyPatch(delta: deltaData, toBasis: fileURL, output: tempURL)
+        try await applyPatch(delta: deltaStream, toBasis: fileURL, output: tempURL)
 
         // Atomic rename
         let result = rename(tempURL.path, fileURL.path)
         if result != 0 {
             throw LibrsyncError.fileWriteError
         }
+    }
+
+    /// Apply patch and atomically replace original file from in-memory delta data
+    /// - Parameters:
+    ///   - deltaData: The delta data
+    ///   - fileURL: URL of the file to patch (will be replaced)
+    public func patch(_ fileURL: URL, with deltaData: Data) async throws {
+        // Create single-element async sequence
+        let stream = AsyncStream<Data> { continuation in
+            continuation.yield(deltaData)
+            continuation.finish()
+        }
+        try await patch(fileURL, with: stream)
     }
 }
 
